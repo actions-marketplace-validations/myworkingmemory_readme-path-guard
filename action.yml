@@ -1,0 +1,23 @@
+name: 'MyWKM README Path Guard'
+description: 'Catch pull requests that break README links to repository files; update one concise PR comment.'
+author: 'Myworkingmemory'
+branding:
+  icon: 'link'
+  color: 'blue'
+inputs:
+  github-token:
+    description: 'GitHub token with contents:read and pull-requests:write for the target repository.'
+    required: false
+    default: ${{ github.token }}
+  fail-on-broken:
+    description: 'Fail the workflow when newly broken repository links are found.'
+    required: false
+    default: 'true'
+outputs:
+  broken-links:
+    description: 'Number of newly broken repository links.'
+  checked-readmes:
+    description: 'Number of README files checked.'
+runs:
+  using: 'node24'
+  main: 'dist/action.cjs'
