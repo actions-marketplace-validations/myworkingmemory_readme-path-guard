@@ -1,6 +1,6 @@
-# README Path Guard
+# README Path Guard — README Link Checker for Pull Requests
 
-Catch the pull request that breaks your README's links to files in your repository.
+A free README link checker for GitHub pull requests. Catch newly broken links to repository files and directories, including a deleted target when the README has not changed.
 
 [Use the free Action on GitHub Marketplace](https://github.com/marketplace/actions/mywkm-readme-path-guard)
 
@@ -8,11 +8,9 @@ Move a guide, delete an image, or mistype a filename: README Path Guard checks t
 
 **Free. No dashboard. No separate tool configuration. No repository code execution.**
 
-```text
-README Path Guard @ abc1234: 1 newly broken repository link — README.md:8 → docs/setup.md.
-```
+[Quick start](#quick-start) · [Example output](#example-output) · [Inputs and outputs](#inputs-and-outputs) · [Troubleshooting](#troubleshooting)
 
-## Add the Action
+## Quick start
 
 Create `.github/workflows/readme-path-guard.yml`:
 
@@ -41,7 +39,23 @@ This workflow deliberately uses `pull_request_target` to comment on fork pull re
 
 Choose the Action **or** the managed App per repository; enabling both produces separate bot comments.
 
-## What it checks
+## Example output
+
+A pull request that deletes a linked file receives one comment:
+
+```text
+README Path Guard @ abc1234: 1 newly broken repository link — README.md:8 → docs/setup.md.
+```
+
+After repair, the same comment updates to the checked head:
+
+```text
+README Path Guard @ def5678: no newly broken repository links (1 README checked).
+```
+
+See the [real App-authored repair result](https://github.com/myworkingmemory/readme-path-guard/pull/3#issuecomment-6545559532) from the owned public acceptance test. The Action uses the same checker and reports through its own token's identity.
+
+## README links this Action checks
 
 - Markdown links and images in `README.md` and `README.markdown`, including nested folders and case variants of the README name.
 - Relative paths and repository-root paths, percent-encoded filenames, and case-sensitive Git paths.
@@ -66,9 +80,16 @@ The initial limits are 50 READMEs per snapshot, 256 KiB per README, complete Git
 | `broken-links` | Newly broken local README link targets, deduplicated per README. |
 | `checked-readmes` | Number of README files in the proposed branch checked. |
 
+## Troubleshooting
+
+- **No PR comment:** confirm the workflow uses `pull_request_target` and grants `contents: read` plus `pull-requests: write`. Organization policies can restrict write tokens. Use only the trusted Action; do not check out the contributor branch in that privileged job.
+- **An older broken path is absent from the report:** the checker compares the base and proposed branch. It reports newly broken README file links, including targets deleted while the README is unchanged, and leaves existing failures out of the way.
+- **The job says the check is incomplete:** inspect the run for input, access or capacity errors. Inaccessible data, Git LFS README pointers and resource limits are failures, not clean results; restore readable input and rerun.
+- **An external website returns 404:** this Action checks repository file paths. Remote HTTP status and heading anchors are outside its scope.
+
 ## Managed GitHub App
 
-The same checker also has a scheduled App worker. App activation and its free Marketplace listing are being prepared; use the Action above now.
+The same checker also has a scheduled App worker. Its bot passed a real broken-link and same-comment repair test on the owned public repository. Managed App setup, entitlement acceptance and its free Marketplace listing are being prepared; use the Action above now.
 
 The App requests only repository contents read, pull requests write, and GitHub's required metadata read. An account owner chooses which repositories to enable. Its scan is scheduled twice an hour, best-effort; GitHub can delay scheduled runs. The worker rotates work, refreshes authentication, revokes temporary installation tokens, and prints aggregate counts rather than private repository details. The approved active free Marketplace plan is required before scanning and before each comment change; missing configuration, cancellation and unavailable purchase verification stop the work. It skips unchanged snapshots from the same checker version and draft PRs. A disabled or failed schedule does not constitute a new passing check.
 
@@ -87,6 +108,8 @@ npm run build
 The checked-in bundles allow users to run the Action without installing packages in their repository. The parser and bundle dependencies are pinned in `package-lock.json`; notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Support and data
+
+Made by [MyWKM](https://www.myworkingmemory.ai/tools/readme-path-guard-95ee4b66e14f40f8b404904aab56e20e).
 
 Open an [issue](https://github.com/myworkingmemory/readme-path-guard/issues) for a reproducible problem, or email dean@myworkingmemory.ai. Keep private repository content and credentials out of public issues. See [data handling](PRIVACY.md) and [security reporting](SECURITY.md).
 

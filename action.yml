@@ -1,5 +1,5 @@
 name: 'MyWKM README Path Guard'
-description: 'Catch pull requests that break README links to repository files; update one concise PR comment.'
+description: 'README link checker for pull requests. Catch newly broken file links, including deleted targets, in one concise comment.'
 author: 'Myworkingmemory'
 branding:
   icon: 'link'

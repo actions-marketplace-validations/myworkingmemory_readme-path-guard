@@ -61,7 +61,7 @@ function checkRepositoryBounded(input, { timeoutMs = 5e3 } = {}) {
 
 // src/github.mjs
 var MARKER = "<!-- mywkm-readme-path-guard:v1 -->";
-var CHECK_VERSION = "1.0.1";
+var CHECK_VERSION = "1.0.2";
 var SHA = /^[a-f0-9]{40,64}$/i;
 var REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 var README = /(^|\/)readme\.(md|markdown)$/i;

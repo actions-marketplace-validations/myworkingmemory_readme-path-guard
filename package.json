@@ -1,6 +1,6 @@
 {
   "name": "readme-path-guard",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "description": "Catch newly broken repository-relative README links in pull requests.",

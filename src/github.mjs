@@ -2,7 +2,7 @@ import { checkRepositoryBounded } from './check-in-worker.mjs';
 import { rotate, rotationSteps } from './rotation.mjs';
 
 export const MARKER = '<!-- mywkm-readme-path-guard:v1 -->';
-export const CHECK_VERSION = '1.0.1';
+export const CHECK_VERSION = '1.0.2';
 const SHA = /^[a-f0-9]{40,64}$/i;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const README = /(^|\/)readme\.(md|markdown)$/i;
