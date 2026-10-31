@@ -172,9 +172,9 @@ const plan = { id: 99, price_model: 'FREE', monthly_price_in_cents: 0, yearly_pr
 const entitlement = { id: 10, marketplace_purchase: { plan } };
 
 function worker({ subscriptions = [entitlement], badRepo = false, oldCache = false, installationCount = 1,
-  exhaustFirst = false } = {}) {
+  exhaustFirst = false, repoCount = 1, pullCount = 1, badRepoStatus } = {}) {
   const f = repository({ comments: oldCache ? [{ id: 8, user: { login: botLogin }, body: `${delivery.MARKER}\n${delivery.snapshotMarker(base, head)}` }] : [] });
-  const calls = [], revoked = [];
+  const calls = [], revoked = [], installationRequests = [];
   let subscriptionCalls = 0, minted = 0;
   const app = async (path, options = {}) => {
     calls.push({ path, options });
@@ -194,25 +194,29 @@ function worker({ subscriptions = [entitlement], badRepo = false, oldCache = fal
     throw new Error('Unexpected synthetic App endpoint.');
   };
   const installationClient = (token, options) => async (path, settings = {}) => {
+    installationRequests.push({ path, method: settings.method || 'GET' });
     if (path === '/installation/token' && settings.method === 'DELETE') {
       assert.equal(options.budget, 1); revoked.push(token); return null;
     }
     if (path.startsWith('/installation/repositories?')) return { repositories: [
       ...(badRepo ? [{ id: 1, full_name: 'owner/inaccessible' }] : []), { id: 2, full_name: 'owner/repo' },
+      ...(repoCount > 1 ? [{ id: 3, full_name: 'owner/otherrepo' }] : []),
     ] };
-    if (path.startsWith('/repos/owner/inaccessible/pulls?')) throw new delivery.GuardError('Synthetic private repository unavailable.');
-    if (path.startsWith(`${root}/pulls?`)) return [{ number: 1 }];
+    if (path.startsWith('/repos/owner/inaccessible/pulls?')) throw Object.assign(new delivery.GuardError('Synthetic private repository unavailable.'), { status: badRepoStatus });
+    if (path.startsWith(`${root}/pulls?`) || path.startsWith('/repos/owner/otherrepo/pulls?')) {
+      return Array.from({ length: pullCount }, (_, index) => ({ number: index + 1 }));
+    }
     if (exhaustFirst && token.endsWith('-1')) throw new delivery.CapacityError('Synthetic exhausted scan budget.');
     return f.request(path, settings);
   };
-  return { ...f, app, installationClient, calls, revoked, minted: () => minted,
+  return { ...f, app, installationClient, calls, revoked, installationRequests, minted: () => minted,
     subscriptionCalls: () => subscriptionCalls, run: freePlanId => delivery.runAppChecks({ app, appId: '123', freePlanId,
       installationClient, deadline: Date.now() + 10000, epoch: 0 }) };
 }
 
 test('App verifies current approved free entitlement before token minting and again before a comment', async () => {
   const f = worker();
-  assert.deepEqual(await f.run('99'), { checked: 1, skipped: 0, failures: 0, marketplaceRequired: true });
+  assert.deepEqual(await f.run('99'), { checked: 1, skipped: 0, inactive: 0, failures: 0, marketplaceRequired: true });
   assert.equal(f.subscriptionCalls(), 2);
   assert.equal(f.minted(), 1);
   assert.equal(f.revoked.length, 1);
@@ -222,26 +226,62 @@ test('App verifies current approved free entitlement before token minting and ag
   assert.equal(f.calls.some(call => call.path.includes('stubbed')), false);
 });
 
-test('cancelled, paid, foreign-account, missing and pending-only plans fail before any scan token', async () => {
-  const unavailable = Object.assign(new delivery.GuardError('Synthetic cancelled account.'), { status: 404 });
-  for (const subscription of [unavailable, {}, { ...entitlement, id: 11 },
+test('cancelled account subscription skips the installation before any token or repository request', async () => {
+  const cancelled = Object.assign(new delivery.GuardError('Synthetic cancelled account.'), { status: 404 });
+  const f = worker({ subscriptions: [cancelled] });
+  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, inactive: 1, failures: 0, marketplaceRequired: true });
+  assert.equal(f.minted(), 0);
+  assert.equal(f.installationRequests.length, 0);
+  assert.equal(f.writes.length, 0);
+});
+
+test('paid, foreign-account, missing and pending-only responses remain failures before any scan token', async () => {
+  for (const subscription of [{}, null, { ...entitlement, id: 11 },
     { id: 10, marketplace_pending_change: { plan } },
     { id: 10, marketplace_purchase: { plan: { ...plan, id: 100 } } },
     { id: 10, marketplace_purchase: { plan: { ...plan, price_model: 'FLAT_RATE' } } },
     { id: 10, marketplace_purchase: { plan: { ...plan, yearly_price_in_cents: 1 } } }]) {
     const f = worker({ subscriptions: [subscription] });
-    assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, failures: 1, marketplaceRequired: true });
+    assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, inactive: 0, failures: 1, marketplaceRequired: true });
     assert.equal(f.minted(), 0);
     assert.equal(f.writes.length, 0);
   }
 });
 
-test('cancellation between scan and comment blocks the mutation and still revokes its token', async () => {
-  const f = worker({ subscriptions: [entitlement, Object.assign(new delivery.GuardError('Synthetic cancelled account.'), { status: 404 })] });
-  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, failures: 1, marketplaceRequired: true });
+test('cancellation before a write stops all remaining PRs and repositories, then revokes its token', async () => {
+  const f = worker({ repoCount: 2, pullCount: 2,
+    subscriptions: [entitlement, Object.assign(new delivery.GuardError('Synthetic cancelled account.'), { status: 404 })] });
+  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, inactive: 1, failures: 0, marketplaceRequired: true });
   assert.equal(f.subscriptionCalls(), 2);
   assert.equal(f.writes.length, 0);
   assert.equal(f.revoked.length, 1);
+  assert.equal(f.installationRequests.some(call => call.path.includes('/pulls/2') || call.path.includes('/owner/otherrepo/')), false);
+});
+
+test('a restored active purchase resumes processing on the next worker run', async () => {
+  const cancelled = Object.assign(new delivery.GuardError('Synthetic cancelled account.'), { status: 404 });
+  const f = worker({ subscriptions: [cancelled, entitlement] });
+  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, inactive: 1, failures: 0, marketplaceRequired: true });
+  assert.deepEqual(await f.run('99'), { checked: 1, skipped: 0, inactive: 0, failures: 0, marketplaceRequired: true });
+  assert.equal(f.minted(), 1);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.revoked.length, 1);
+});
+
+test('authentication, rate-limit, outage and transport errors remain failures, not inactive subscriptions', async () => {
+  for (const status of [401, 403, 429, 500, 502, 503, undefined]) {
+    const failure = Object.assign(new delivery.GuardError('Synthetic verification unavailable.'), { status });
+    const f = worker({ subscriptions: [failure] });
+    assert.deepEqual(await f.run('99'), { checked: 0, skipped: 0, inactive: 0, failures: 1, marketplaceRequired: true });
+    assert.equal(f.minted(), 0);
+    assert.equal(f.writes.length, 0);
+  }
+});
+
+test('an unrelated repository 404 remains a failure and does not become an inactive installation', async () => {
+  const f = worker({ badRepo: true, badRepoStatus: 404 });
+  assert.deepEqual(await f.run('99'), { checked: 1, skipped: 0, inactive: 0, failures: 1, marketplaceRequired: true });
+  assert.equal(f.writes.length, 1);
 });
 
 test('a future free plan cannot override a currently paid plan, while current free access remains valid', async () => {
@@ -268,7 +308,7 @@ test('missing approved plan configuration fails before any App request, token, o
 test('bad repositories do not mask healthy repositories with approved current entitlement', async () => {
   const f = worker({ badRepo: true });
   const result = await f.run('99');
-  assert.deepEqual(result, { checked: 1, skipped: 0, failures: 1, marketplaceRequired: true });
+  assert.deepEqual(result, { checked: 1, skipped: 0, inactive: 0, failures: 1, marketplaceRequired: true });
   assert.equal(f.subscriptionCalls(), 2);
   assert.equal(f.writes.length, 1);
   assert.equal(JSON.stringify(result).includes('owner'), false);
@@ -285,7 +325,7 @@ test('an exhausted installation does not prevent a later installation or token c
 
 test('current cached snapshots still verify entitlement before they skip', async () => {
   const f = worker({ oldCache: true });
-  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 1, failures: 0, marketplaceRequired: true });
+  assert.deepEqual(await f.run('99'), { checked: 0, skipped: 1, inactive: 0, failures: 0, marketplaceRequired: true });
   assert.equal(f.subscriptionCalls(), 1);
   assert.equal(f.writes.length, 0);
 });

@@ -16,11 +16,11 @@ async function main() {
   // Refresh for every App-level request; a queued/slow run never reuses an
   // expired JWT to mint an installation token.
   const app = (path, options) => createClient(jwt(appId, key), { deadline })(path, options);
-  const { checked, skipped, failures } = await runAppChecks({ app, appId,
+  const { checked, skipped, inactive, failures } = await runAppChecks({ app, appId,
     freePlanId: process.env.MARKETPLACE_FREE_PLAN_ID, deadline });
   // This workflow is public: never print installation names, repository identities,
   // README text, filenames, findings or API error bodies from private repositories.
-  console.log(`README Path Guard App: ${checked} checked; ${skipped} unchanged/closed; ${failures} incomplete.`);
+  console.log(`README Path Guard App: ${checked} checked; ${skipped} unchanged/closed; ${inactive} inactive installations; ${failures} incomplete.`);
   if (failures) process.exitCode = 1;
 }
 

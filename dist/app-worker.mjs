@@ -86,6 +86,12 @@ var GuardError = class extends Error {
 };
 var CapacityError = class extends GuardError {
 };
+var InactiveEntitlementError = class extends GuardError {
+  constructor() {
+    super("No active Marketplace subscription exists for this account.");
+    this.code = "ENTITLEMENT_INACTIVE";
+  }
+};
 function createClient(token, { fetcher = fetch, budget = 450, deadline = Infinity } = {}) {
   if (typeof token !== "string" || !token) throw new GuardError("A GitHub token is required.");
   let remaining = budget;
@@ -250,7 +256,13 @@ ${MARKER}
 }
 async function verifyMarketplaceEntitlement({ app, accountId, freePlanId }) {
   if (!/^[1-9]\d*$/.test(String(accountId || "")) || !/^[1-9]\d*$/.test(String(freePlanId || ""))) throw new GuardError("Marketplace account or free plan is not configured.");
-  const account = await app(`/marketplace_listing/accounts/${accountId}`);
+  let account;
+  try {
+    account = await app(`/marketplace_listing/accounts/${accountId}`);
+  } catch (error) {
+    if (error?.status === 404) throw new InactiveEntitlementError();
+    throw error;
+  }
   const plan = account?.marketplace_purchase?.plan;
   if (String(account?.id) !== String(accountId) || String(plan?.id) !== String(freePlanId) || typeof plan?.price_model !== "string" || plan.price_model.toLowerCase() !== "free" || plan.monthly_price_in_cents !== 0 || plan.yearly_price_in_cents !== 0) throw new GuardError("The approved active free Marketplace plan could not be verified.");
 }
@@ -271,7 +283,7 @@ async function runAppChecks({
   const installations = await pages(app, "/app/installations");
   installations.sort((a, b) => a.id - b.id);
   const steps = rotationSteps(epoch, installations.length);
-  let checked = 0, skipped = 0, failures = 0;
+  let checked = 0, skipped = 0, inactive = 0, failures = 0;
   for (const installation of rotate(installations, steps.installation)) {
     if (Date.now() >= deadline) {
       failures++;
@@ -299,12 +311,12 @@ async function runAppChecks({
                 const result = await runPullRequest({ request, repo: repo.full_name, number: pr.number, botLogin, skipUnchanged: true, beforeWrite });
                 result.skipped ? skipped++ : checked++;
               } catch (error) {
-                if (error instanceof CapacityError) throw error;
+                if (error instanceof CapacityError || error instanceof InactiveEntitlementError) throw error;
                 failures++;
               }
             }
           } catch (error) {
-            if (error instanceof CapacityError) throw error;
+            if (error instanceof CapacityError || error instanceof InactiveEntitlementError) throw error;
             failures++;
           }
         }
@@ -312,11 +324,12 @@ async function runAppChecks({
         await installationClient(access.token, { budget: 1, deadline: Date.now() + 5e3 })("/installation/token", { method: "DELETE" }).catch(() => {
         });
       }
-    } catch {
-      failures++;
+    } catch (error) {
+      if (error instanceof InactiveEntitlementError) inactive++;
+      else failures++;
     }
   }
-  return { checked, skipped, failures, marketplaceRequired: true };
+  return { checked, skipped, inactive, failures, marketplaceRequired: true };
 }
 
 // src/app-worker.mjs
@@ -332,13 +345,13 @@ async function main() {
   if (!/^[1-9]\d*$/.test(appId || "") || !key) throw new Error("App credentials are not configured.");
   const deadline = Date.now() + 6 * 60 * 1e3;
   const app = (path, options) => createClient(jwt(appId, key), { deadline })(path, options);
-  const { checked, skipped, failures } = await runAppChecks({
+  const { checked, skipped, inactive, failures } = await runAppChecks({
     app,
     appId,
     freePlanId: process.env.MARKETPLACE_FREE_PLAN_ID,
     deadline
   });
-  console.log(`README Path Guard App: ${checked} checked; ${skipped} unchanged/closed; ${failures} incomplete.`);
+  console.log(`README Path Guard App: ${checked} checked; ${skipped} unchanged/closed; ${inactive} inactive installations; ${failures} incomplete.`);
   if (failures) process.exitCode = 1;
 }
 main().catch(() => {

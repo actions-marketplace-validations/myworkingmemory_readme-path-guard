@@ -11,6 +11,12 @@ const MAX_BYTES = 262144;
 
 export class GuardError extends Error {}
 export class CapacityError extends GuardError {}
+export class InactiveEntitlementError extends GuardError {
+  constructor() {
+    super('No active Marketplace subscription exists for this account.');
+    this.code = 'ENTITLEMENT_INACTIVE';
+  }
+}
 
 // All authenticated traffic is restricted to GitHub's API. PR data is never run.
 export function createClient(token, { fetcher = fetch, budget = 450, deadline = Infinity } = {}) {
@@ -201,7 +207,15 @@ export async function commentAuthor(request, configuredLogin = '') {
 export async function verifyMarketplaceEntitlement({ app, accountId, freePlanId }) {
   if (!/^[1-9]\d*$/.test(String(accountId || '')) || !/^[1-9]\d*$/.test(String(freePlanId || ''))) throw new GuardError('Marketplace account or free plan is not configured.');
   // App JWT and current production plan only. A pending plan grants no access.
-  const account = await app(`/marketplace_listing/accounts/${accountId}`);
+  let account;
+  try {
+    account = await app(`/marketplace_listing/accounts/${accountId}`);
+  } catch (error) {
+    // Only this production account endpoint's documented absence is inactive.
+    // Authentication, outages and unrelated 404s remain operational failures.
+    if (error?.status === 404) throw new InactiveEntitlementError();
+    throw error;
+  }
   const plan = account?.marketplace_purchase?.plan;
   if (String(account?.id) !== String(accountId) || String(plan?.id) !== String(freePlanId)
     || typeof plan?.price_model !== 'string' || plan.price_model.toLowerCase() !== 'free'
@@ -221,7 +235,7 @@ export async function runAppChecks({ app, appId, freePlanId, installationClient 
   const installations = await pages(app, '/app/installations');
   installations.sort((a, b) => a.id - b.id);
   const steps = rotationSteps(epoch, installations.length);
-  let checked = 0, skipped = 0, failures = 0;
+  let checked = 0, skipped = 0, inactive = 0, failures = 0;
   for (const installation of rotate(installations, steps.installation)) {
     if (Date.now() >= deadline) { failures++; break; }
     if (installation.suspended_at) continue;
@@ -245,14 +259,23 @@ export async function runAppChecks({ app, appId, freePlanId, installationClient 
               try {
                 const result = await runPullRequest({ request, repo: repo.full_name, number: pr.number, botLogin, skipUnchanged: true, beforeWrite });
                 result.skipped ? skipped++ : checked++;
-              } catch (error) { if (error instanceof CapacityError) throw error; failures++; }
+              } catch (error) {
+                if (error instanceof CapacityError || error instanceof InactiveEntitlementError) throw error;
+                failures++;
+              }
             }
-          } catch (error) { if (error instanceof CapacityError) throw error; failures++; }
+          } catch (error) {
+            if (error instanceof CapacityError || error instanceof InactiveEntitlementError) throw error;
+            failures++;
+          }
         }
       } finally {
         await installationClient(access.token, { budget: 1, deadline: Date.now() + 5000 })('/installation/token', { method: 'DELETE' }).catch(() => {});
       }
-    } catch { failures++; }
+    } catch (error) {
+      if (error instanceof InactiveEntitlementError) inactive++;
+      else failures++;
+    }
   }
-  return { checked, skipped, failures, marketplaceRequired: true };
+  return { checked, skipped, inactive, failures, marketplaceRequired: true };
 }
