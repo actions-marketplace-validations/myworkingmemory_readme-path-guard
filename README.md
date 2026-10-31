@@ -6,7 +6,7 @@ Catch the pull request that breaks your README's links to files in your reposito
 
 Move a guide, delete an image, or mistype a filename: README Path Guard checks the proposed branch, compares it with the base, and updates one concise pull-request comment. Existing broken links stay out of the way.
 
-**Free. No dashboard. No configuration file. No repository code execution.**
+**Free. No dashboard. No separate tool configuration. No repository code execution.**
 
 ```text
 README Path Guard @ abc1234: 1 newly broken repository link — README.md:8 → docs/setup.md.
