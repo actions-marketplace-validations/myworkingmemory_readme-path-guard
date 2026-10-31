@@ -1,6 +1,8 @@
-import { checkRepository } from './core.mjs';
+import { checkRepositoryBounded } from './check-in-worker.mjs';
+import { rotate, rotationSteps } from './rotation.mjs';
 
 export const MARKER = '<!-- mywkm-readme-path-guard:v1 -->';
+export const CHECK_VERSION = '1.0.1';
 const SHA = /^[a-f0-9]{40,64}$/i;
 const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const README = /(^|\/)readme\.(md|markdown)$/i;
@@ -12,7 +14,7 @@ export class CapacityError extends GuardError {}
 
 // All authenticated traffic is restricted to GitHub's API. PR data is never run.
 export function createClient(token, { fetcher = fetch, budget = 450, deadline = Infinity } = {}) {
-  if (!token) throw new GuardError('A GitHub token is required.');
+  if (typeof token !== 'string' || !token) throw new GuardError('A GitHub token is required.');
   let remaining = budget;
   return async function request(path, { method = 'GET', body } = {}) {
     if (!path.startsWith('/') || path.startsWith('//') || /[\r\n]/.test(path)) {
@@ -20,13 +22,17 @@ export function createClient(token, { fetcher = fetch, budget = 450, deadline = 
     }
     if (--remaining < 0 || Date.now() >= deadline) throw new CapacityError('Request/time budget reached; coverage is incomplete.');
     const response = await fetcher(`https://api.github.com${path}`, {
-      method, redirect: 'error', signal: AbortSignal.timeout(20000),
+      method, redirect: 'error', signal: AbortSignal.timeout(Math.max(1, Math.min(20000, deadline - Date.now()))),
       headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28', 'user-agent': 'MyWKM-README-Path-Guard',
         ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
-    if (!response.ok) throw new GuardError(`GitHub API returned ${response.status}; no clean result was recorded.`);
+    if (!response.ok) {
+      const error = new GuardError(`GitHub API returned ${response.status}; no clean result was recorded.`);
+      error.status = response.status;
+      throw error;
+    }
     if (response.status === 204) return null;
     return response.json();
   };
@@ -52,7 +58,7 @@ function repoPath(repo) {
 async function treeAt(request, root, sha) {
   if (!SHA.test(sha)) throw new GuardError('Invalid commit identity.');
   const data = await request(`${root}/git/trees/${sha}?recursive=1`);
-  if (data.truncated || !Array.isArray(data.tree)) throw new GuardError('Repository tree is incomplete; check cannot pass.');
+  if (data.truncated !== false || !Array.isArray(data.tree)) throw new GuardError('Repository tree is incomplete; check cannot pass.');
   return data.tree;
 }
 
@@ -61,15 +67,26 @@ async function readmesAt(request, root, tree) {
   if (readmes.length > MAX_READMES) throw new GuardError('Repository exceeds the 50-README limit; check cannot pass.');
   const result = Object.create(null);
   for (const entry of readmes) {
-    if (!SHA.test(entry.sha) || entry.size > MAX_BYTES) throw new GuardError('README exceeds the safe input limit; check cannot pass.');
+    if (!SHA.test(entry.sha) || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > MAX_BYTES) {
+      throw new GuardError('README metadata is invalid or exceeds the safe input limit; check cannot pass.');
+    }
     const blob = await request(`${root}/git/blobs/${entry.sha}`);
-    if (blob.encoding !== 'base64' || typeof blob.content !== 'string' || blob.size > MAX_BYTES || blob.content.length > MAX_BYTES * 1.5) {
+    if (blob.encoding !== 'base64' || typeof blob.content !== 'string' || !Number.isSafeInteger(blob.size)
+      || blob.size < 0 || blob.size > MAX_BYTES || blob.size !== entry.size || blob.content.length > MAX_BYTES * 1.5) {
       throw new GuardError('README could not be read completely; check cannot pass.');
     }
-    const bytes = Buffer.from(blob.content, 'base64');
+    const encoded = blob.content.replace(/[\r\n]/g, '');
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      throw new GuardError('README base64 is invalid; check cannot pass.');
+    }
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.length !== blob.size) throw new GuardError('README byte count does not match its metadata; check cannot pass.');
     if (bytes.length > MAX_BYTES) throw new GuardError('README exceeds the safe input limit; check cannot pass.');
     try { result[entry.path] = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
     catch { throw new GuardError('README is not valid UTF-8; check cannot pass.'); }
+    if (/^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[a-f0-9]{64}\r?\nsize \d+\r?\n?$/.test(result[entry.path])) {
+      throw new GuardError('README is a Git LFS pointer; its content was not checked.');
+    }
   }
   return result;
 }
@@ -78,20 +95,32 @@ function code(value) {
   return `<code>${String(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/@/g, '&#64;').slice(0, 300)}</code>`;
 }
 
+export function snapshotMarker(base, head) {
+  return `<!-- snapshot:${CHECK_VERSION}:${base}:${head} -->`;
+}
+
 export function commentBody(result, base, head) {
   const count = result.findings.length;
   const details = result.findings.slice(0, 3).map(f => `${code(f.file)}:${f.line} → ${code(f.target)}`).join('; ');
   const line = count
     ? `README Path Guard @ ${head.slice(0, 7)}: ${count} newly broken repository link${count === 1 ? '' : 's'} — ${details}${count > 3 ? `; +${count - 3} more` : ''}.`
     : `README Path Guard @ ${head.slice(0, 7)}: no newly broken repository links (${result.checkedReadmes} README${result.checkedReadmes === 1 ? '' : 's'} checked).`;
-  return `${line}\n${MARKER}\n<!-- snapshot:${base}:${head} -->`;
+  return `${line}\n${MARKER}\n${snapshotMarker(base, head)}`;
 }
 
 function isOwnedComment(comment, botLogin) {
   return comment.user?.login === botLogin && typeof comment.body === 'string' && comment.body.includes(MARKER);
 }
 
-export async function runPullRequest({ request, repo, number, botLogin, skipUnchanged = false }) {
+function ownedComments(comments, botLogin) {
+  const owned = comments.filter(comment => isOwnedComment(comment, botLogin));
+  if (owned.some(comment => !Number.isSafeInteger(comment.id) || comment.id < 1)) {
+    throw new GuardError('GitHub comment identity is invalid; no comment was changed.');
+  }
+  return owned.sort((a, b) => a.id - b.id);
+}
+
+export async function runPullRequest({ request, repo, number, botLogin, skipUnchanged = false, beforeWrite }) {
   if (!Number.isSafeInteger(number) || number < 1 || !botLogin) throw new GuardError('Valid pull request and bot identity required.');
   const root = repoPath(repo);
   const pr = await request(`${root}/pulls/${number}`);
@@ -99,8 +128,8 @@ export async function runPullRequest({ request, repo, number, botLogin, skipUnch
   const base = pr.base?.sha, head = pr.head?.sha;
   if (!SHA.test(base || '') || !SHA.test(head || '')) throw new GuardError('Pull request snapshot is unavailable.');
   const comments = await pages(request, `${root}/issues/${number}/comments`);
-  const existing = comments.find(comment => isOwnedComment(comment, botLogin));
-  if (skipUnchanged && existing?.body.includes(`<!-- snapshot:${base}:${head} -->`)) return { skipped: 'unchanged' };
+  const existing = ownedComments(comments, botLogin)[0];
+  if (skipUnchanged && existing?.body.includes(snapshotMarker(base, head))) return { skipped: 'unchanged' };
   const baseTree = await treeAt(request, root, base);
   const headTree = await treeAt(request, root, head);
   const baseFiles = await readmesAt(request, root, baseTree);
@@ -114,15 +143,116 @@ export async function runPullRequest({ request, repo, number, botLogin, skipUnch
       }
     }
   }
-  const result = checkRepository({ baseFiles, headFiles, baseAliases, baseTree: baseTree.map(e => e.path), headTree: headTree.map(e => e.path) });
+  let result;
+  let parserError;
+  try {
+    result = await checkRepositoryBounded({ baseFiles, headFiles, baseAliases, baseTree: baseTree.map(e => e.path), headTree: headTree.map(e => e.path) });
+  } catch (error) {
+    parserError = error;
+  }
   // A pushed commit must not receive the previous snapshot's clean result.
   const current = await request(`${root}/pulls/${number}`);
   if (current.state !== 'open' || current.head?.sha !== head || current.base?.sha !== base) return { skipped: 'changed' };
-  const body = commentBody(result, base, head);
-  if (existing) {
-    if (existing.body !== body) await request(`${root}/issues/comments/${existing.id}`, { method: 'PATCH', body: { body } });
-  } else {
-    await request(`${root}/issues/${number}/comments`, { method: 'POST', body: { body } });
+  const body = parserError
+    ? `README Path Guard @ ${head.slice(0, 7)}: check incomplete — README parsing could not finish within safe resource limits.\n${MARKER}\n<!-- incomplete:${CHECK_VERSION}:${base}:${head} -->`
+    : commentBody(result, base, head);
+  async function mutate(path, options) {
+    if (beforeWrite) await beforeWrite();
+    return request(path, options);
   }
+  if (existing) {
+    if (existing.body !== body) await mutate(`${root}/issues/comments/${existing.id}`, { method: 'PATCH', body: { body } });
+  } else {
+    const created = await mutate(`${root}/issues/${number}/comments`, { method: 'POST', body: { body } });
+    if (!Number.isSafeInteger(created?.id) || created.id < 1) throw new GuardError('Created comment identity is unavailable.');
+    // Concurrency is the primary guard. If two first checks still create a
+    // comment, remove only the duplicate created by this run, never old content.
+    const after = ownedComments(await pages(request, `${root}/issues/${number}/comments`), botLogin);
+    const canonical = after[0];
+    if (canonical && canonical.id !== created.id) {
+      const latest = await request(`${root}/pulls/${number}`);
+      if (latest.state === 'open' && latest.head?.sha === head && latest.base?.sha === base && canonical.body !== body) {
+        await mutate(`${root}/issues/comments/${canonical.id}`, { method: 'PATCH', body: { body } });
+      }
+      await mutate(`${root}/issues/comments/${created.id}`, { method: 'DELETE' });
+    }
+  }
+  if (parserError) throw parserError;
   return { ...result, base, head };
+}
+
+// Personal user tokens identify their real author. Custom installation tokens
+// must supply their bot login because installation tokens cannot call /user.
+export async function commentAuthor(request, configuredLogin = '') {
+  if (configuredLogin) {
+    if (!/^[A-Za-z0-9-]{1,100}(?:\[bot\])?$/.test(configuredLogin)) throw new GuardError('Comment author is invalid.');
+    return configuredLogin;
+  }
+  try {
+    const user = await request('/user');
+    if (typeof user.login !== 'string' || !/^[A-Za-z0-9-]{1,100}(?:\[bot\])?$/.test(user.login)) throw new GuardError('Comment author could not be identified.');
+    return user.login;
+  } catch (error) {
+    if (error.status !== 403) throw error;
+    return 'github-actions[bot]';
+  }
+}
+
+export async function verifyMarketplaceEntitlement({ app, accountId, freePlanId }) {
+  if (!/^[1-9]\d*$/.test(String(accountId || '')) || !/^[1-9]\d*$/.test(String(freePlanId || ''))) throw new GuardError('Marketplace account or free plan is not configured.');
+  // App JWT and current production plan only. A pending plan grants no access.
+  const account = await app(`/marketplace_listing/accounts/${accountId}`);
+  const plan = account?.marketplace_purchase?.plan;
+  if (String(account?.id) !== String(accountId) || String(plan?.id) !== String(freePlanId)
+    || typeof plan?.price_model !== 'string' || plan.price_model.toLowerCase() !== 'free'
+    || plan.monthly_price_in_cents !== 0 || plan.yearly_price_in_cents !== 0) throw new GuardError('The approved active free Marketplace plan could not be verified.');
+}
+
+// Injected orchestration permits deterministic cancellation/fault-isolation
+// tests. Only aggregate counts leave the worker, never private repo identities.
+export async function runAppChecks({ app, appId, freePlanId, installationClient = createClient,
+  deadline = Date.now() + 6 * 60 * 1000, epoch = Math.floor(Date.now() / 1800000) }) {
+  if (!/^[1-9]\d*$/.test(String(appId || '')) || !/^[1-9]\d*$/.test(String(freePlanId || ''))) {
+    throw new GuardError('App configuration requires an approved free Marketplace plan.');
+  }
+  const info = await app('/app');
+  if (String(info.id) !== String(appId) || !/^[A-Za-z0-9-]{1,100}$/.test(info.slug || '')) throw new GuardError('App identity could not be verified.');
+  const botLogin = `${info.slug}[bot]`;
+  const installations = await pages(app, '/app/installations');
+  installations.sort((a, b) => a.id - b.id);
+  const steps = rotationSteps(epoch, installations.length);
+  let checked = 0, skipped = 0, failures = 0;
+  for (const installation of rotate(installations, steps.installation)) {
+    if (Date.now() >= deadline) { failures++; break; }
+    if (installation.suspended_at) continue;
+    try {
+      if (!Number.isSafeInteger(installation.id) || installation.id < 1) throw new GuardError('Installation identity is invalid.');
+      const beforeWrite = () => verifyMarketplaceEntitlement({ app, accountId: installation.account?.id, freePlanId });
+      await beforeWrite();
+      const access = await app(`/app/installations/${installation.id}/access_tokens`, { method: 'POST', body: { permissions: { contents: 'read', pull_requests: 'write' } } });
+      const request = installationClient(access.token, { budget: 350, deadline });
+      try {
+        const repos = await pages(request, '/installation/repositories', 'repositories');
+        repos.sort((a, b) => a.id - b.id);
+        const repoSteps = rotationSteps(epoch, installations.length, repos.length);
+        for (const repo of rotate(repos, repoSteps.repository)) {
+          try {
+            const root = repoPath(repo.full_name);
+            const pulls = await pages(request, `${root}/pulls?state=open&sort=updated&direction=desc`);
+            pulls.sort((a, b) => a.number - b.number);
+            for (const pr of rotate(pulls, repoSteps.pull)) {
+              if (pr.draft) continue;
+              try {
+                const result = await runPullRequest({ request, repo: repo.full_name, number: pr.number, botLogin, skipUnchanged: true, beforeWrite });
+                result.skipped ? skipped++ : checked++;
+              } catch (error) { if (error instanceof CapacityError) throw error; failures++; }
+            }
+          } catch (error) { if (error instanceof CapacityError) throw error; failures++; }
+        }
+      } finally {
+        await installationClient(access.token, { budget: 1, deadline: Date.now() + 5000 })('/installation/token', { method: 'DELETE' }).catch(() => {});
+      }
+    } catch { failures++; }
+  }
+  return { checked, skipped, failures, marketplaceRequired: true };
 }

@@ -1,10 +1,12 @@
 import { posix } from 'node:path';
-import { Parser } from 'commonmark';
+import { fromMarkdown } from 'mdast-util-from-markdown';
+import { gfm } from 'micromark-extension-gfm';
+import { gfmFromMarkdown } from 'mdast-util-gfm';
 
 // Parse data only: repository content never becomes HTML, a command, or a URL request.
-const parser = new Parser();
 const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const controls = /[\u0000-\u001f\u007f]/;
+const blockTypes = new Set(['paragraph', 'heading', 'tableCell']);
 
 function localTarget(destination, file) {
   if (!destination || destination.startsWith('#') || destination.startsWith('?') ||
@@ -15,7 +17,7 @@ function localTarget(destination, file) {
   let decoded;
   try {
     // A second decoding would misinterpret literal percent-encoded filenames.
-    decoded = decodeURIComponent(withoutSuffix);
+    decoded = decodeURIComponent(withoutSuffix.replace(/%(?![\da-f]{2})/gi, '%25'));
   } catch {
     return { resolved: '', reason: 'invalid-encoding' };
   }
@@ -52,35 +54,59 @@ function knownPaths(tree) {
   return paths;
 }
 
-function blockLine(node) {
-  // CommonMark supplies block positions, not precise inline positions.
-  for (let current = node; current; current = current.parent) {
-    if (current.sourcepos) return current.sourcepos[0][0];
-  }
-  return 1;
-}
-
 function inspect(file, markdown, paths) {
   if (typeof markdown !== 'string') throw new TypeError('README content must be a string.');
   const findings = new Map();
   let checkedLinks = 0;
-  const walker = parser.parse(markdown).walker();
-  let event;
-  while ((event = walker.next())) {
-    if (!event.entering || !['link', 'image'].includes(event.node.type)) continue;
-    const target = event.node.destination;
+  const tree = fromMarkdown(markdown, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
+  const definitions = new Map();
+  const footnotes = new Map();
+  const allNodes = [tree];
+  while (allNodes.length) {
+    const node = allNodes.pop();
+    if (node.type === 'definition' && !definitions.has(node.identifier)) definitions.set(node.identifier, node.url);
+    if (node.type === 'footnoteDefinition' && !footnotes.has(node.identifier)) footnotes.set(node.identifier, node);
+    if (node.children) {
+      for (let index = node.children.length - 1; index >= 0; index -= 1) allNodes.push(node.children[index]);
+    }
+  }
+
+  // Definition bodies are not rendered in place. Follow only referenced
+  // footnotes, once each, including references reached inside other footnotes.
+  const visitedFootnotes = new Set();
+  const renderedNodes = [{ node: tree, line: 1 }];
+  while (renderedNodes.length) {
+    const { node, line: parentLine } = renderedNodes.pop();
+    if (node.type === 'definition' || node.type === 'footnoteDefinition') continue;
+    const line = blockTypes.has(node.type) ? node.position.start.line : parentLine;
+    if (node.type === 'footnoteReference') {
+      const definition = footnotes.get(node.identifier);
+      if (definition && !visitedFootnotes.has(node.identifier)) {
+        visitedFootnotes.add(node.identifier);
+        for (let index = definition.children.length - 1; index >= 0; index -= 1) {
+          renderedNodes.push({ node: definition.children[index], line });
+        }
+      }
+      continue;
+    }
+    if (node.children) {
+      for (let index = node.children.length - 1; index >= 0; index -= 1) renderedNodes.push({ node: node.children[index], line });
+    }
+    let target;
+    if (node.type === 'link' || node.type === 'image') target = node.url;
+    else if (node.type === 'linkReference' || node.type === 'imageReference') target = definitions.get(node.identifier);
+    else continue;
     const resolved = localTarget(target, file);
     if (!resolved) continue;
     checkedLinks += 1;
     if (resolved.reason || !paths.has(resolved.resolved)) {
-      if (!findings.has(target)) {
-        findings.set(target, {
-          file,
-          line: blockLine(event.node),
-          target,
-          resolved: resolved.resolved,
-          reason: resolved.reason || 'missing-path',
-        });
+      const reason = resolved.reason || 'missing-path';
+      // This product checks file paths, not query strings or heading anchors.
+      const identity = reason === 'missing-path' ? `path\0${resolved.resolved}` :
+        `error\0${reason}\0${target.split(/[?#]/, 1)[0]}`;
+      const previous = findings.get(identity);
+      if (!previous || line < previous.line || (line === previous.line && target < previous.target)) {
+        findings.set(identity, { file, line, target, resolved: resolved.resolved, reason });
       }
     }
   }
@@ -112,8 +138,8 @@ export function checkRepository({ baseFiles = {}, headFiles = {}, baseTree = [],
     const after = inspect(file, markdown, headPaths);
     checkedReadmes += 1;
     checkedLinks += after.checkedLinks;
-    for (const [target, finding] of after.findings) {
-      if (!before.has(target)) findings.push(finding);
+    for (const [identity, finding] of after.findings) {
+      if (!before.has(identity)) findings.push(finding);
     }
   }
   findings.sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 :

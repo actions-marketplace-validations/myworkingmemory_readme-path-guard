@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runPullRequest, commentBody, createClient, pages, MARKER } from '../src/github.mjs';
+import { runPullRequest, commentBody, createClient, pages, MARKER, snapshotMarker } from '../src/github.mjs';
 
 const base = 'a'.repeat(40), head = 'b'.repeat(40), blob = 'c'.repeat(40);
 const pr = { state: 'open', base: { sha: base }, head: { sha: head } };
@@ -12,10 +12,10 @@ function fake({ comments = [], mutate = false, truncated = false } = {}) {
     if (path === `${root}/pulls/1`) return mutate && ++reads > 1 ? { ...pr, head: { sha: 'd'.repeat(40) } } : pr;
     if (path.startsWith(`${root}/issues/1/comments?`)) return comments;
     if (path.includes('/git/trees/')) return { truncated, tree: [
-      { path: 'README.md', type: 'blob', mode: '100644', size: 20, sha: blob },
+      { path: 'README.md', type: 'blob', mode: '100644', size: 17, sha: blob },
       ...(path.includes(base) ? [{ path: 'guide.md', type: 'blob', mode: '100644', sha: 'd'.repeat(40) }] : [])
     ] };
-    if (path === `${root}/git/blobs/${blob}`) return { encoding: 'base64', size: 20, content: Buffer.from('[Guide](guide.md)').toString('base64') };
+    if (path === `${root}/git/blobs/${blob}`) return { encoding: 'base64', size: 17, content: Buffer.from('[Guide](guide.md)').toString('base64') };
     throw new Error(`Unexpected test request: ${path}`);
   } };
 }
@@ -50,7 +50,7 @@ test('a truncated tree cannot produce a passing comment', async () => {
   assert.equal(f.writes.length, 0);
 });
 test('App skips a previously completed exact snapshot', async () => {
-  const f = fake({ comments: [{ id: 7, user: { login: 'guard[bot]' }, body: `${MARKER}\n<!-- snapshot:${base}:${head} -->` }] });
+  const f = fake({ comments: [{ id: 7, user: { login: 'guard[bot]' }, body: `${MARKER}\n${snapshotMarker(base, head)}` }] });
   const result = await runPullRequest({ ...f, repo: 'owner/repo', number: 1, botLogin: 'guard[bot]', skipUnchanged: true });
   assert.equal(result.skipped, 'unchanged');
   assert.equal(f.writes.length, 0);
@@ -82,4 +82,18 @@ test('README over the content limit fails without posting', async () => {
     ? { encoding: 'base64', size: 9999999, content: '' } : f.request(path, options);
   await assert.rejects(runPullRequest({ request, repo: 'owner/repo', number: 1, botLogin: 'guard[bot]' }), /check cannot pass/);
   assert.equal(f.writes.length, 0);
+});
+
+test('a parser failure replaces a historical clean result with an explicit incomplete result', async () => {
+  const f = fake({ comments: [{ id: 7, user: { login: 'guard[bot]' }, body: `${MARKER}\nHistorical clean result` }] });
+  const request = async (path, options) => {
+    const response = await f.request(path, options);
+    if (path.includes('/git/trees/')) response.tree.push({ path: '/noncanonical-path', type: 'blob' });
+    return response;
+  };
+  await assert.rejects(runPullRequest({ request, repo: 'owner/repo', number: 1, botLogin: 'guard[bot]' }), { code: 'PARSER_FAILURE' });
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.writes[0].method, 'PATCH');
+  assert.match(f.writes[0].body.body, /check incomplete/);
+  assert.ok(!f.writes[0].body.body.includes(snapshotMarker(base, head)));
 });

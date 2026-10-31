@@ -8,4 +8,6 @@ This release does not fetch linked websites, run repository code, operate a cust
 
 The free Marketplace event receiver verifies signed event payloads and acknowledges free-plan events without storing a separate entitlement database. Paid plans are disabled in this release.
 
+Managed App setup is hosted on Myworkingmemory's existing Vercel website. It uses a short-lived secure browser cookie, checks GitHub identity, the selected installation's permissions and its approved free Marketplace purchase, then revokes the transient user token. The App worker checks GitHub's current subscription record before work and comment changes. Repository contents are parsed in a separate worker thread that does not inherit runner credentials. These controls do not create a separate customer database or dashboard.
+
 An account owner can remove repository access or uninstall the App in GitHub settings. A repository owner can remove the workflow to stop the Action. Questions or deletion requests concerning publisher-held information: dean@myworkingmemory.ai.

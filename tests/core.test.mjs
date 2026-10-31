@@ -52,6 +52,22 @@ test('handles encoded spaces, Unicode, literal percent, encoded separators and b
   assert.equal(run(md, paths).findings.length, 0);
 });
 
+test('encoded hash and query characters belong to filenames and are decoded only once', () => {
+  const md = '[hash](docs/hash%23tag.md) [query](docs/query%3Ftag.md) [percent](docs/literal%252Fname.md)';
+  assert.equal(run(md, ['docs/hash#tag.md', 'docs/query?tag.md', 'docs/literal%2Fname.md']).findings.length, 0);
+});
+
+test('Unicode filenames retain Git byte identity instead of silently normalizing accents', () => {
+  const result = run('[guide](caf%C3%A9.md)', ['cafe\u0301.md']);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].resolved, 'caf\u00e9.md');
+});
+
+test('known leaf paths do not invent descendants through symlink or submodule contents', () => {
+  const result = run('[leaf](linked) [nested](linked/guide.md) [submodule](vendor) [inside](vendor/README.md)', ['linked', 'vendor']);
+  assert.deepEqual(result.findings.map(f => f.resolved), ['linked/guide.md', 'vendor/README.md']);
+});
+
 test('handles malformed UTF-8 encoding and control bytes without crashing', () => {
   const result = run('[bad](docs/%FF.md) [null](a%00b.md) [line](a%0Ab.md)');
   assert.deepEqual(result.findings.map(f => [f.target, f.reason]), [
@@ -61,7 +77,7 @@ test('handles malformed UTF-8 encoding and control bytes without crashing', () =
   ]);
 });
 
-test('CommonMark normalization preserves malformed literal percent as a literal path character', () => {
+test('literal malformed percent remains a literal path character', () => {
   assert.equal(run('[literal](docs/%GG.md)', ['docs/%GG.md']).findings.length, 0);
   const result = run('[literal](docs/%GG.md)');
   assert.equal(result.findings[0].resolved, 'docs/%GG.md');
@@ -116,8 +132,90 @@ test('deduplicates target failures within a README without losing link counts', 
   assert.equal(result.findings[0].line, 1);
 });
 
+test('fragment, query, and equivalent encoding edits do not introduce a new broken file path', () => {
+  const before = '[guide](docs/missing%20file.md#old?view=1)';
+  const after = '[guide](<docs/missing file.md?plain=1#new>)';
+  assert.deepEqual(run(after, [], before), { findings: [], checkedReadmes: 1, checkedLinks: 1 });
+});
+
+test('deduplicates a broken file path reached through different fragments and path spellings', () => {
+  const result = run('[one](./missing.md#one)\n\n[two](missing.md?plain=1#two)');
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.checkedLinks, 2);
+  assert.equal(result.findings[0].line, 1);
+});
+
+test('deduplication keeps the earliest source block when a footnote is visited first', () => {
+  const md = 'See note[^note].\n\n[direct](missing.md#direct)\n\n[^note]: [inside](missing.md#footnote)';
+  const result = run(md);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].line, 3);
+});
+
 test('case-sensitive paths match Git repository behavior', () => {
   assert.equal(run('[a](Docs/Guide.md)', ['docs/guide.md']).findings.length, 1);
+});
+
+test('links and nested images inside image descriptions are alt text, not checked destinations', () => {
+  const md = '![An [example](missing.md) and ![nested](missing.png)](valid.png)';
+  assert.deepEqual(run(md, ['valid.png']), { findings: [], checkedReadmes: 1, checkedLinks: 1 });
+});
+
+test('checks both the image destination and enclosing link for a linked image', () => {
+  const md = '[![alt](missing.png)](missing.md)';
+  const result = run(md);
+  assert.deepEqual(result.findings.map(f => f.target), ['missing.md', 'missing.png']);
+  assert.equal(result.checkedLinks, 2);
+});
+
+test('turning alt-text-only markup into a real link introduces a checkable break', () => {
+  const result = run('[now clickable](missing.md)', ['valid.png'], '![An [example](missing.md)](valid.png)');
+  assert.deepEqual(result.findings.map(f => f.target), ['missing.md']);
+});
+
+test('GFM footnote text resembling a path is not a repository link', () => {
+  const result = run('An explanation[^note].\n\n[^note]: docs/missing.md');
+  assert.deepEqual(result, { findings: [], checkedReadmes: 1, checkedLinks: 0 });
+});
+
+test('checks Markdown links inside a referenced GFM footnote', () => {
+  const result = run('An explanation[^note].\n\n[^note]: See [the guide](docs/missing.md).');
+  assert.equal(result.checkedLinks, 1);
+  assert.deepEqual(result.findings.map(f => f.target), ['docs/missing.md']);
+});
+
+test('unused GFM footnotes do not introduce rendered links', () => {
+  const result = run('No footnote is used.\n\n[^unused]: See [the guide](docs/missing.md).');
+  assert.deepEqual(result, { findings: [], checkedReadmes: 1, checkedLinks: 0 });
+});
+
+test('cyclic and repeated footnote references inspect each rendered definition only once', () => {
+  const md = 'Root[^a] and again[^a].\n\n[^a]: [first](one.md) and [^b].\n\n[^b]: [second](two.md) and [^a].';
+  const result = run(md);
+  assert.equal(result.checkedLinks, 2);
+  assert.deepEqual(result.findings.map(f => f.target), ['one.md', 'two.md']);
+});
+
+test('GFM autolink literals remain external and are never checked as repository paths', () => {
+  const result = run('www.example.com/docs and person@example.com and https://example.com/a');
+  assert.deepEqual(result, { findings: [], checkedReadmes: 1, checkedLinks: 0 });
+});
+
+test('unused link definitions are not checked and reference labels are normalized', () => {
+  const md = '[Guide][MiXeD    label]\n\n[mixed label]: existing.md\n[unused]: missing.md';
+  assert.deepEqual(run(md, ['existing.md']), { findings: [], checkedReadmes: 1, checkedLinks: 1 });
+});
+
+test('duplicate Markdown definitions use the first matching definition', () => {
+  const md = '[Guide][doc]\n\n[doc]: existing.md\n[doc]: missing.md';
+  assert.deepEqual(run(md, ['existing.md']), { findings: [], checkedReadmes: 1, checkedLinks: 1 });
+});
+
+test('GFM tables check active links while inline code remains text', () => {
+  const md = '| Code | Guide |\n| --- | --- |\n| `[fake](fake.md)` | [real](missing.md) |';
+  const result = run(md);
+  assert.equal(result.checkedLinks, 1);
+  assert.deepEqual(result.findings.map(f => f.target), ['missing.md']);
 });
 
 test('sorts findings deterministically by file, block line, and target', () => {

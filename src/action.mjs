@@ -1,15 +1,17 @@
 import { readFileSync, appendFileSync } from 'node:fs';
-import { createClient, runPullRequest } from './github.mjs';
+import { commentAuthor, createClient, runPullRequest } from './github.mjs';
 
 async function main() {
   const allowed = new Set(['pull_request', 'pull_request_target']);
   if (!allowed.has(process.env.GITHUB_EVENT_NAME)) throw new Error('Run this Action on pull_request or pull_request_target.');
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  const request = createClient(process.env['INPUT_GITHUB-TOKEN'] || process.env.GITHUB_TOKEN,
+    { deadline: Date.now() + 4 * 60 * 1000 });
   const result = await runPullRequest({
-    request: createClient(process.env['INPUT_GITHUB-TOKEN'] || process.env.GITHUB_TOKEN),
+    request,
     repo: process.env.GITHUB_REPOSITORY,
     number: event.pull_request?.number ?? event.number,
-    botLogin: 'github-actions[bot]'
+    botLogin: await commentAuthor(request, process.env['INPUT_COMMENT-AUTHOR'])
   });
   if (result.skipped) {
     console.log('README Path Guard: pull request closed or changed; no stale result posted.');

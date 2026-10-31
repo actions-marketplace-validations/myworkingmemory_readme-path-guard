@@ -2,6 +2,8 @@
 
 Catch the pull request that breaks your README's links to files in your repository.
 
+[Use the free Action on GitHub Marketplace](https://github.com/marketplace/actions/mywkm-readme-path-guard)
+
 Move a guide, delete an image, or mistype a filename: README Path Guard checks the proposed branch, compares it with the base, and updates one concise pull-request comment. Existing broken links stay out of the way.
 
 **Free. No dashboard. No configuration file. No repository code execution.**
@@ -18,7 +20,7 @@ Create `.github/workflows/readme-path-guard.yml`:
 name: README paths
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 permissions:
   contents: read
   pull-requests: write
@@ -45,10 +47,11 @@ Choose the Action **or** the managed App per repository; enabling both produces 
 - Relative paths and repository-root paths, percent-encoded filenames, and case-sensitive Git paths.
 - Targets lost through moves or deletions, even when the README itself is unchanged.
 - A renamed README's old location when determining whether a problem already existed.
+- GitHub Markdown tables and referenced footnotes; image descriptions and unreferenced footnotes are treated as text.
 
 The tool checks **path existence**. It does not fetch external websites, validate heading anchors, inspect HTML `href`/`src`, follow symlinks/submodules, or scan arbitrary Markdown files. A reported line is the start of the containing Markdown block. It reports up to three examples in its one-line comment, with the total count when more exist. The full count is also an Action output. The checked head commit appears visibly so a historical comment cannot be mistaken for a newer scan.
 
-The initial limits are 50 READMEs per snapshot, 256 KiB per README, complete Git trees, and bounded API pagination/requests. An incomplete or inaccessible scan fails rather than reporting clean. Organizations that restrict write tokens must allow the two documented permissions.
+The initial limits are 50 READMEs per snapshot, 256 KiB per README, complete Git trees, and bounded API pagination/requests. Parsing runs separately with a five-second deadline and a 256 MiB heap limit, without inheriting the runner's tokens or environment. Git LFS README pointers and incomplete or inaccessible data fail rather than reporting clean. A parser limit replaces an older comment with an explicit incomplete result. Organizations that restrict write tokens must allow the two documented permissions.
 
 ## Inputs and outputs
 
@@ -56,6 +59,7 @@ The initial limits are 50 READMEs per snapshot, 256 KiB per README, complete Git
 | --- | --- | --- |
 | `github-token` | `${{ github.token }}` | Read repository contents and write the PR comment. |
 | `fail-on-broken` | `true` | Set to `false` for a comment without failing the job. |
+| `comment-author` | Automatic | Personal token authors are detected; supply the bot login when using a custom GitHub App installation token. |
 
 | Output | Meaning |
 | --- | --- |
@@ -66,7 +70,7 @@ The initial limits are 50 READMEs per snapshot, 256 KiB per README, complete Git
 
 The same checker also has a scheduled App worker. App activation and its free Marketplace listing are being prepared; use the Action above now.
 
-The App requests only repository contents read, pull requests write, and GitHub's required metadata read. An account owner chooses which repositories to enable. Its scan is scheduled twice an hour, best-effort; GitHub can delay scheduled runs. The worker rotates work to prevent a large early installation from owning every batch, refreshes authentication, revokes temporary installation tokens, and prints aggregate counts rather than private repository details. It skips unchanged snapshots and draft PRs. A disabled or failed schedule does not constitute a new passing check.
+The App requests only repository contents read, pull requests write, and GitHub's required metadata read. An account owner chooses which repositories to enable. Its scan is scheduled twice an hour, best-effort; GitHub can delay scheduled runs. The worker rotates work, refreshes authentication, revokes temporary installation tokens, and prints aggregate counts rather than private repository details. The approved active free Marketplace plan is required before scanning and before each comment change; missing configuration, cancellation and unavailable purchase verification stop the work. It skips unchanged snapshots from the same checker version and draft PRs. A disabled or failed schedule does not constitute a new passing check.
 
 App installations, repositories selected, Action usage and paid customers are different measurements. Using this Action does not install the App or contribute to the App's installation count.
 

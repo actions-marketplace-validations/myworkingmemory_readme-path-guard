@@ -1,6 +1,6 @@
 {
   "name": "readme-path-guard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Catch newly broken repository-relative README links in pull requests.",
@@ -10,10 +10,12 @@
   },
   "scripts": {
     "test": "node --test",
-    "build": "esbuild src/action.mjs --tsconfig=tsconfig.json --bundle --platform=node --format=cjs --target=node24 --outfile=dist/action.cjs && esbuild src/app-worker.mjs --tsconfig=tsconfig.json --bundle --platform=node --format=cjs --target=node24 --outfile=dist/app-worker.cjs"
+    "build": "node scripts/build.mjs"
   },
   "dependencies": {
-    "commonmark": "0.31.2"
+    "mdast-util-from-markdown": "2.1.0",
+    "mdast-util-gfm": "3.1.0",
+    "micromark-extension-gfm": "3.0.0"
   },
   "devDependencies": {
     "esbuild": "0.28.2"
